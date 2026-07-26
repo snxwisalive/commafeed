@@ -589,3 +589,116 @@ This matches `FeedEntryService.markEntry()` — a user can only interact with en
 - JPA: `@Entity`, `@Table`, `@ManyToOne`, `@Column`
 - Transactions: `@Transactional` on REST methods only
 - No Spring annotations (`@RestController`, `@Autowired`, etc.)
+
+## Level 2: LLM "Rewrite this entry" Endpoint
+
+### 1. Why this section looks different from Level 1
+ 
+Level 1 (`EntryNote`) copies an existing vertical slice (`FeedEntryTag`) and adapts it — the
+plan there is mostly *pattern discovery*. Level 2 has no analog anywhere in CommaFeed: there is
+no existing "call an external HTTP API and return its result" slice to copy. So this plan is
+mostly *new design*, constrained by the project's existing layering rules (REST → Service →
+DAO) rather than by an existing sibling class. Where Level 1's plan says "do what
+`FeedEntryTag`/`FeedEntryTagService` does", this plan has to justify each choice from first
+principles and cross-check it against the closest available reference (`EntryREST`).
+ 
+### 2. Design
+ 
+**Two services, not one.** The LLM call is split into two layers:
+ 
+| Class | Responsibility | Analogy in the project |
+|---|---|---|
+| `LlmRewriteService` | Pure HTTP client to an OpenAI-compatible chat-completions endpoint. Knows nothing about `FeedEntry`. Maps transport/HTTP failures to `WebApplicationException` (`BAD_GATEWAY` for non-200 responses, `GATEWAY_TIMEOUT` for interruption, `INTERNAL_SERVER_ERROR` for anything else). | Comparable to how `FeedRefreshEngine` isolates "talk to an external feed URL" from the entities that use the result. |
+| `EntryRewriteService` | Business logic: load the `FeedEntry` via `FeedEntryDAO`, pick `title` or `content` from `FeedEntryContent`, validate it isn't blank, then delegate the actual rewrite to `LlmRewriteService`. Throws `NOT_FOUND`/`BAD_REQUEST` for entry-level problems. | Mirrors `FeedEntryService`/`FeedSubscriptionService`: a `@Singleton` service, constructor injection, no Lombok on the constructor, orchestrating one or more DAOs/services and enforcing business rules — matches the pattern confirmed against `FeedSubscriptionService`. |
+ 
+This mirrors the project's own separation of "external I/O client" vs. "business rule that
+uses the client" — the same reason `FeedRefreshEngine` is not folded into `FeedEntryService`.
+ 
+**Why `HttpClient` and not a new dependency.** No new library needed for a single
+JSON-over-HTTPS POST; keeps the dependency surface unchanged, which matters since this task
+only touches `commafeed-server`.
+ 
+**Why OpenAI-compatible request shape.** Lets a reviewer point `app.llm.url` at a local Ollama
+instance (`http://localhost:11434/v1/chat/completions`) or any free-tier hosted provider
+(Groq, Together, etc.) without code changes — only configuration.
+ 
+**Why REST does not talk to `FeedEntryDAO` directly (correction from first draft).** The first
+implementation had `EntryRewriteREST` calling `FeedEntryDAO.findById(...)` and reading
+`entry.getContent()` inline. This broke the project's REST → Service → DAO rule (see
+`DECISIONS.md`, entry on this). Fixed by moving all of that into `EntryRewriteService`; the
+REST class now only maps the validated request DTO to a service call and the service result to
+a response DTO — exactly the shape of `EntryREST.markEntry()`.
+ 
+### 3. API contract
+ 
+`POST /rest/entry/{id}/generate-alternative`
+ 
+Request (`GenerateAlternativeRequest`):
+```json
+{ "target": "title", "prompt": "rewrite this headline for a technical audience" }
+```
+ 
+Response (`GenerateAlternativeResponse`), `200 OK`:
+```json
+{
+  "originalEntryId": "12345",
+  "target": "title",
+  "prompt": "rewrite this headline for a technical audience",
+  "generatedAlternative": "..."
+}
+```
+ 
+### 4. Error handling table
+ 
+| Condition | Detected in | Status | Notes |
+|---|---|---|---|
+| Entry does not exist | `EntryRewriteService.generateAlternative` | `404 NOT_FOUND` | thrown as `WebApplicationException`, handled by JAX-RS default (no custom `ExceptionMapper` needed — confirmed no mapper for `WebApplicationException` in `ExceptionMappers.java`) |
+| Requested `target` field is blank/missing on the entry | `EntryRewriteService.generateAlternative` | `400 BAD_REQUEST` | e.g. entry has no content body but `target=content` was requested |
+| Request body fails bean validation (`target` not `title`/`content`, `prompt` blank) | JAX-RS `@Valid` → `ValidationException` | `400 BAD_REQUEST` | handled by the project's existing `ExceptionMappers.validationFailed` |
+| LLM endpoint returns non-200 | `LlmRewriteService.rewrite` | `502 BAD_GATEWAY` | logged server-side (`log.error`), no stack trace or upstream body leaked to client |
+| LLM call interrupted / timed out | `LlmRewriteService.rewrite` | `504 GATEWAY_TIMEOUT` | |
+| Any other unexpected failure in the LLM call | `LlmRewriteService.rewrite` | `500 INTERNAL_SERVER_ERROR` | catch-all, still no stack trace leaked |
+| Unauthenticated request | `@RolesAllowed(Roles.USER)` on `EntryRewriteREST` | `401` | matches every other resource in `frontend.resource` |
+ 
+### 5. Step-by-step (as implemented)
+ 
+1. Add LLM config keys to `application.properties`: `app.llm.url`, `app.llm.api-key`,
+   `app.llm.model`, `app.llm.timeout-seconds` (default `15`). Key stays out of source control —
+   placeholder value only, real key supplied via env/`.env` at runtime.
+2. `GenerateAlternativeRequest` / `GenerateAlternativeResponse` DTOs in
+   `frontend.model.request` / `frontend.model`, matching the project's `@Data` + `@Schema`
+   (+ `@RegisterForReflection` on the response, matching other response DTOs) convention.
+3. `LlmRewriteService` (`backend.service`, `@ApplicationScoped`): builds the OpenAI-style
+   payload, sends it via `HttpClient`, parses `choices[0].message.content`, maps failures per
+   the error table above.
+4. `EntryRewriteService` (`backend.service`, `@Singleton`, plain constructor — matches
+   `FeedSubscriptionService`): loads the entry via `FeedEntryDAO`, extracts `title`/`content`,
+   validates, delegates to `LlmRewriteService`.
+5. `EntryRewriteREST` (`frontend.resource`): `@Path("/rest/entry")`,
+   `@RolesAllowed(Roles.USER)`, `@Transactional` on the endpoint method, `@Operation`/`@Tag`
+   for OpenAPI parity with `EntryREST`. Only maps `GenerateAlternativeRequest` →
+   `EntryRewriteService` → `GenerateAlternativeResponse`.
+6. `EntryRewriteIT` extends `BaseIT` (reuses `initialSetup(...)` instead of duplicating HTTP
+   setup), uses `@InjectMock LlmRewriteService` to test three cases: success, entry not found,
+   LLM failure mapped to `502`. Requests authenticate via
+   `RestAssured.given().auth().preemptive().basic(TestConstants.ADMIN_USERNAME, ...)`, matching
+   every other IT in the project, and use `rest/entry/...` paths without a leading slash.
+### 6. File checklist
+ 
+| # | Action | File |
+|---|---|---|
+| 1 | Edit | `application.properties` (LLM config keys) |
+| 2 | Create | `frontend/model/request/GenerateAlternativeRequest.java` |
+| 3 | Create | `frontend/model/GenerateAlternativeResponse.java` |
+| 4 | Create | `backend/service/LlmRewriteService.java` |
+| 5 | Create | `backend/service/EntryRewriteService.java` |
+| 6 | Create | `frontend/resource/EntryRewriteREST.java` |
+| 7 | Create | `test/.../integration/rest/EntryRewriteIT.java` |
+ 
+### 7. Known limitation / next step
+ 
+The LLM API key currently sits as a placeholder default in `application.properties`
+(`dummy-key-replace-in-env`). For a real deployment this should be required (no default) and
+fail fast at startup if unset, rather than failing per-request with a generic `502`. Left as-is
+for this exercise since a hard startup failure would block reviewers from running the rest of
+the app without an LLM key configured.
