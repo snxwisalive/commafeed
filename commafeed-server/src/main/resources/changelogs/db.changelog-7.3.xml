@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+	<changeSet author="commafeed" id="create-entry-notes-table">
+		<createTable tableName="ENTRYNOTES">
+			<column name="id" type="BIGINT">
+				<constraints nullable="false" primaryKey="true"/>
+			</column>
+			<column name="user_id" type="BIGINT">
+				<constraints nullable="false"/>
+			</column>
+			<column name="entry_id" type="BIGINT">
+				<constraints nullable="false"/>
+			</column>
+			<column name="comment" type="VARCHAR(500)">
+				<constraints nullable="false"/>
+			</column>
+			<column name="star_rating" type="INTEGER">
+				<constraints nullable="false"/>
+			</column>
+			<column name="updated" type="${timestamp_type}">
+				<constraints nullable="false"/>
+			</column>
+		</createTable>
+
+		<addForeignKeyConstraint constraintName="fk_entrynote_entry_id"
+			baseTableName="ENTRYNOTES" baseColumnNames="entry_id"
+			referencedTableName="FEEDENTRIES" referencedColumnNames="id"/>
+
+		<addForeignKeyConstraint constraintName="fk_entrynote_user_id"
+			baseTableName="ENTRYNOTES" baseColumnNames="user_id"
+			referencedTableName="USERS" referencedColumnNames="id"/>
+
+		<createIndex tableName="ENTRYNOTES" indexName="entrynote_user_entry_index" unique="true">
+			<column name="user_id"/>
+			<column name="entry_id"/>
+		</createIndex>
+	</changeSet>
+
+</databaseChangeLog>
