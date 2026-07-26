@@ -1,193 +1,191 @@
-# CommaFeed
+# CommaFeed — AI-Native Trainee Test Task
 
-Google Reader inspired self-hosted RSS reader, based on Quarkus and React/TypeScript.
+This is a fork of [CommaFeed](https://github.com/Athou/commafeed), a self-hosted RSS reader,
+extended with two new features as part of the FAC.71.01 AI-Native Java Trainee test task.
+Only `commafeed-server` was touched; `commafeed-client` is untouched.
 
-![preview](https://user-images.githubusercontent.com/1256795/184886828-1973f148-58a9-4c6d-9587-ee5e5d3cc2cb.png)
+**Fork:** https://github.com/snxwisalive/commafeed
 
-## Features
+**Demo video:** https://youtu.be/8Evd20IqxIY
 
-- 4 different layouts
-- Light/Dark theme
-- Fully responsive, works great on both mobile and desktop
-- Keyboard shortcuts for almost everything
-- Support for right-to-left feeds
-- Translated in 25+ languages
-- Supports thousands of users and millions of feeds
-- OPML import/export
-- REST API
-- Fever-compatible API for native mobile apps
-- Can automatically mark articles as read based on user-defined rules
-- Push notifications when new articles are published
-- Highly customizable with [custom CSS](https://athou.github.io/commafeed/documentation/custom-css) and JavaScript
-- [Browser extension](https://github.com/Athou/commafeed-browser-extension)
-- Compiles to native code for blazing fast startup and low memory usage
-- Supports 4 databases
-    - H2 (embedded database)
-    - PostgreSQL
-    - MySQL
-    - MariaDB
+## What was added
 
-## Usage
+- **Level 1 — Saved entry notes**: a user can attach a short comment + 1-5 star rating to a
+  feed entry they've read. New `EntryNote` entity, `EntryNoteDAO`, `EntryNoteService`,
+  `EntryNoteREST` (`POST /rest/entry/note`, `GET /rest/entry/notes`), following the existing
+  `FeedEntryTag` vertical slice pattern.
+- **Level 2 — LLM "rewrite this entry"**: `POST /rest/entry/{id}/generate-alternative` sends
+  an entry's title or content plus a free-text instruction to an LLM and returns the generated
+  alternative. New `LlmRewriteService` (HTTP client to an OpenAI-compatible endpoint),
+  `EntryRewriteService` (business logic/validation), `EntryRewriteREST`.
+- **Level 4 (extra credit)** — done: integration tests for both new endpoints
+  (`EntryNoteIT`, `EntryRewriteIT`). Chosen over Level 3 because it directly exercises the code
+  that was reviewed hardest during this task (the REST↔Service boundary corrections described
+  in `DECISIONS.md`), with low risk of destabilizing the existing feed-refresh pipeline.
+- **Level 3 (keyword-match notifications)** — skipped. Wiring a new notification channel into
+  the existing feed-refresh flow (`FeedRefreshEngine`/`FeedSubscriptionService`) carries real
+  risk of breaking core functionality for a feature explicitly marked "extra credit, do not
+  force it." Given the time budget, Level 4 offered a better effort/value trade-off.
 
-### Public instance
+## Setup & run
 
-A free public instance is available at https://www.commafeed.com.
+Requires no external database — uses the embedded H2 profile.
 
-It has no ads, no tracking, and your data is never exploited or sold to third parties. The service is funded entirely through donations.
-However, this public instance does have a few limitations compared to self-hosted setups, outlined [here](https://github.com/Athou/commafeed/discussions/1567).
+```bash
+# from the repository root, one-time full build (also builds commafeed-client,
+# required once so the Maven reactor has classes to work with)
+mvn install -DskipTests
 
-### Docker
+# then run only the server in dev mode
+cd commafeed-server
+mvn quarkus:dev
+```
 
-Docker is the easiest way to get started with self-hosted CommaFeed.
+In dev mode (`mvn quarkus:dev`), the server listens on `http://localhost:8083`
+(`%dev.quarkus.http.port=8083` in `application.properties`). All curl examples below use this
+port. Note that the plain (non-dev) profile uses `8082`, and the test profile uses `8085`
+(`quarkus.http.test-port`) — this is separate from what you'll hit manually.
 
-Docker images are built automatically and are available at https://hub.docker.com/r/athou/commafeed
+### First-time setup: create the admin user
 
-### Cloud hosting
+CommaFeed starts with an empty database. Create the first user once:
 
-[PikaPods](https://www.pikapods.com) offers 1-click cloud hosting solutions starting at $1/month with a free $5
-welcome credit and officially supports CommaFeed.
-PikaPods shares 20% of the revenue back to CommaFeed.
+```bash
+curl -X POST http://localhost:8083/rest/user/initialSetup \
+  -H "Content-Type: application/json" \
+  -d '{"name":"admin","password":"admin","email":"admin@commafeed.com"}'
+```
 
-[![PikaPods](https://www.pikapods.com/static/run-button.svg)](https://www.pikapods.com/pods?run=commafeed)
+### Subscribe to a feed to get a real entry ID
 
-### Download a precompiled package
+```bash
+curl -u admin:admin -X POST http://localhost:8083/rest/feed/subscribe \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://news.ycombinator.com/rss","title":"HN"}'
+# -> returns a numeric subscriptionId
 
-Go to the [release page](https://github.com/Athou/commafeed/releases) and download the latest version for your operating
-system and database of choice.
+curl -u admin:admin "http://localhost:8083/rest/feed/entries?id=<subscriptionId>"
+# -> entries[].id gives you a real entry id to use below
+```
 
-There are two types of packages:
+## Level 1 — Saved entry notes
 
-- The `linux-x86_64`, `linux-aarch_64` and `windows-x86_64` packages are compiled natively and contain an executable that can be run
-  directly.
-- The `jvm` package is a zip file containing all `.jar` files required to run the application. This package works on all
-  platforms but requires a JRE and is started with `java -jar quarkus-run.jar`.
+### `POST /rest/entry/note`
 
-If available for your operating system, the native package is recommended because it has a faster startup time and lower
-memory usage.
+Create or update (upsert) a note on an entry. One note per user per entry.
 
-### Build from sources
+```bash
+curl -u admin:admin -X POST http://localhost:8083/rest/entry/note \
+  -H "Content-Type: application/json" \
+  -d '{"entryId":2,"comment":"Great article on origami PCBs","starRating":4}'
+```
 
-    ./mvnw clean package [-P<database> [-Pnative]] [-DskipTests]
+Response (`200 OK`):
+```json
+{"id":1,"entryId":2,"comment":"Great article on origami PCBs","starRating":4,"updated":1785083688140}
+```
 
-- `<database>` can be one of `h2`, `postgresql`, `mysql` or `mariadb`. The default is `h2`.
-- `-Pnative` compiles the application to native code. This requires either GraalVM to be installed (`GRAALVM_HOME` environment
-  variable pointing to a GraalVM installation) or a container environment to be available (docker/podman/...).
-- `-DskipTests` to speed up the build process by skipping tests.
+### `GET /rest/entry/notes`
 
-When the build is complete:
+List all notes for the current user.
 
-- a zip containing all jars required to run the application is located at
-  `commafeed-server/target/commafeed-<version>-<database>-jvm.zip`. Extract it and run the application with
-  `java -jar quarkus-run.jar`
-- if you used the native profile, the executable is located at
-  `commafeed-server/target/commafeed-<version>-<database>-<platform>-<arch>-runner[.exe]`
+```bash
+curl -u admin:admin http://localhost:8083/rest/entry/notes
+```
 
-### Distribution packages
+Response (`200 OK`):
+```json
+[{"id":1,"entryId":2,"comment":"Great article on origami PCBs","starRating":4,"updated":1785083688140}]
+```
 
-- Arch Linux users can use [the CommaFeed package on AUR](https://aur.archlinux.org/pkgbase/commafeed), which builds native binaries with GraalVM for all supported databases.
+If the entry doesn't exist, or the user isn't subscribed to its feed, `POST /rest/entry/note`
+returns `404 Not Found`.
 
-## Configuration
+## Level 2 — LLM "rewrite this entry"
 
-CommaFeed doesn't require any configuration to run with its embedded database (H2). The database file will be stored in
-the `data` directory of the current directory.
+### `POST /rest/entry/{id}/generate-alternative`
 
-To use a different database, you will need to configure the following properties:
+```bash
+curl -u admin:admin -X POST http://localhost:8083/rest/entry/2/generate-alternative \
+  -H "Content-Type: application/json" \
+  -d '{"target":"title","prompt":"rewrite this headline for a technical audience"}'
+```
 
-- `quarkus.datasource.jdbc.url`
-    - e.g. for H2: `jdbc:h2:./data/db;DEFRAG_ALWAYS=TRUE`
-    - e.g. for PostgreSQL: `jdbc:postgresql://localhost:5432/commafeed`
-    - e.g. for MySQL:
-      `jdbc:mysql://localhost/commafeed?autoReconnect=true&failOverReadOnly=false&maxReconnects=20&rewriteBatchedStatements=true&timezone=UTC`
-    - e.g. for MariaDB:
-      `jdbc:mariadb://localhost/commafeed?autoReconnect=true&failOverReadOnly=false&maxReconnects=20&rewriteBatchedStatements=true&timezone=UTC`
-- `quarkus.datasource.username`
-- `quarkus.datasource.password`
+Response (`200 OK`):
+```json
+{
+  "originalEntryId": "2",
+  "target": "title",
+  "prompt": "rewrite this headline for a technical audience",
+  "generatedAlternative": "Fabrication of an Origami-Style Printed Circuit Board (PCB)"
+}
+```
 
-There are multiple ways to configure CommaFeed:
+**Error handling:**
 
-- a `config/application.properties` [properties](https://en.wikipedia.org/wiki/.properties) file relative to the working
-  directory (keys in kebab-case)
-- Command line arguments each prefixed with `-D` (keys in kebab-case)
-- Environment variables (keys in UPPER_CASE)
-- a `.env` file in the working directory (keys in UPPER_CASE)
+| Condition | Status |
+|---|---|
+| Entry doesn't exist | `404 Not Found` |
+| Requested `target` field is blank/missing on the entry | `400 Bad Request` |
+| Invalid request body (`target` not `title`/`content`, blank `prompt`) | `400 Bad Request` |
+| LLM endpoint returns a non-200 response | `502 Bad Gateway` |
+| LLM request times out / is interrupted | `504 Gateway Timeout` |
+| Any other failure calling the LLM | `500 Internal Server Error` |
 
-When in doubt, the properties file is recommended because CommaFeed will be able to warn about invalid properties and typos.
+No stack traces are ever leaked to the client; failures are logged server-side only.
 
-All [CommaFeed settings](https://athou.github.io/commafeed/documentation) are optional and have sensible default values.
+### LLM configuration
 
-When logging in, credentials are stored in an encrypted cookie. The encryption key is randomly generated at startup,
-meaning that you will have to log back in after each restart of the application. To prevent this, you can set the
-`quarkus.http.auth.session.encryption-key` property to a fixed value (min. 16 characters).
-All other Quarkus settings can be found [here](https://quarkus.io/guides/all-config).
+Configured via `app.llm.*` in `application.properties` (or override via environment
+variables — never commit a real key):
 
-When started, the server will listen on http://localhost:8082.
+```properties
+app.llm.url=https://api.groq.com/openai/v1/chat/completions
+app.llm.api-key=dummy-key-replace-in-env
+app.llm.model=openai/gpt-oss-20b
+app.llm.timeout-seconds=15
+```
 
-### Updates
+Tested against [Groq](https://console.groq.com) (free tier). The endpoint is OpenAI-compatible,
+so pointing `app.llm.url` at a local Ollama instance
+(`http://localhost:11434/v1/chat/completions`) also works, provided the model name is adjusted
+accordingly. **Note:** Groq deprecates models fairly often — `llama3-8b-8192` and later
+`llama-3.1-8b-instant`/`llama-3.3-70b-versatile` were all deprecated during this task. Check
+[console.groq.com/docs/models](https://console.groq.com/docs/models) for the current list
+before running this yourself.
 
-When CommaFeed is up and running, you can subscribe to [this feed](https://github.com/Athou/commafeed/releases.atom) to be notified of new releases.
+## My AI workflow
 
-### Memory management
+- **Level 1** was built with **Cursor**, prompted with the full REST→Service→DAO→Entity layer
+  analysis up front (see `PLAN.md`), so the AI worked from an approved spec rather than
+  prompt-and-pray. Midway through generation Cursor hit its context/token limit and locked the
+  session; rather than restart from scratch, I kept the already-generated files, treated the
+  approved `PLAN.md` as the source of truth, and finished the remaining files with a
+  general-purpose LLM chat interface, chunk by chunk (see `DECISIONS.md`, entry 2).
+- **Level 2** was built with **Claude**, iteratively: I fed it the CommaFeed conventions
+  discovered during Level 1's analysis, had it draft the LLM service and REST resource, then
+  reviewed every file against the actual reference class (`EntryREST`) before accepting it.
+  Three real corrections came out of this review — REST bypassing the Service layer, missing
+  `@RolesAllowed`/wrong `@Path`, and integration tests assuming security bypass that doesn't
+  exist in this project — all logged honestly in `DECISIONS.md`.
+- **Managing context on a large, unfamiliar codebase**: rather than pasting the whole repo, I
+  had the AI (and did myself) build a small reference table up front — which existing class is
+  the closest analog for each new piece (`FeedEntryTag` for notes, `EntryREST` for the REST
+  shape, `FeedSubscriptionService` for service-layer conventions) — and fed only those specific
+  files into context when writing or reviewing each new file, instead of the whole repo at once.
+- **Keeping token usage under control**: plan-first (`PLAN.md`) meant most of the "understand
+  the codebase" cost was paid once, up front, rather than repeatedly re-explaining conventions
+  to the AI across many small prompts.
 
-The Java Virtual Machine (JVM) is rather greedy by default and will not release unused memory to the
-operating system. This is because acquiring memory from the operating system is a relatively expensive operation.
-This can be problematic on systems with limited memory.
+See `DECISIONS.md` for the full log of AI proposals that were reviewed and corrected — the
+single artifact I'd point a reviewer to first.
 
-#### Hard limit (`native` and `jvm` packages)
+## What's left unfinished / next steps
 
-The JVM can be configured to use a maximum amount of memory with the `-Xmx` parameter.
-For example, to limit the JVM to 256MB of memory, use `-Xmx256m`.
-
-#### Dynamic sizing (`jvm` package)
-
-In addition to the previous setting, the JVM can be configured to release unused memory to the operating system with the
-following parameters:
-
-    -Xms20m -XX:+UseG1GC -XX:+UseStringDeduplication -XX:-ShrinkHeapInSteps -XX:G1PeriodicGCInterval=10000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=5 -XX:MaxHeapFreeRatio=10
-
-See [here](https://docs.oracle.com/en/java/javase/17/gctuning/garbage-first-g1-garbage-collector1.html)
-and [here](https://docs.oracle.com/en/java/javase/17/gctuning/factors-affecting-garbage-collection-performance.html) for
-more
-information.
-
-#### OpenJ9 (`jvm` package)
-
-The [OpenJ9](https://eclipse.dev/openj9/) JVM is a more memory-efficient alternative to the HotSpot JVM, at the cost of
-slightly slower throughput.
-
-IBM provides precompiled binaries for OpenJ9
-named [Semeru](https://developer.ibm.com/languages/java/semeru-runtimes/downloads/).
-This is the JVM used in
-the [Docker image](https://github.com/Athou/commafeed/blob/master/commafeed-server/src/main/docker/Dockerfile.jvm).
-
-## Translation
-
-Files for internationalization are
-located [here](https://github.com/Athou/commafeed/tree/master/commafeed-client/src/locales).
-
-To add a new language:
-
-- add the new locale to the `locales` array in:
-    - `commafeed-client/.linguirc`
-    - `commafeed-client/src/i18n.ts`
-- run `npm run i18n:extract`
-- add translations to the newly created `commafeed-client/src/locales/[locale]/messages.po` file
-
-The name of the locale should be the
-two-letters [ISO-639-1 language code](http://en.wikipedia.org/wiki/List_of_ISO_639-1_codes).
-
-## Local development
-
-### Backend
-
-- Open `commafeed-server` in your preferred Java IDE.
-    - CommaFeed uses Lombok, you need the Lombok plugin for your IDE.
-- run `./mvnw quarkus:dev`
-
-### Frontend
-
-- Open `commafeed-client` in your preferred JavaScript IDE.
-- run `npm install`
-- run `npm run dev`
-
-The frontend server is now running at http://localhost:8082 and is proxying REST requests to the backend running on
-port 8083
+- Level 3 (keyword-match notifications) was intentionally skipped — see rationale above.
+- The `app.llm.api-key` default in `application.properties` is a placeholder
+  (`dummy-key-replace-in-env`). In a real deployment this should have no default and fail fast
+  at startup if unset, rather than failing per-request with a generic `502`. Left as-is here so
+  reviewers can run the rest of the app without needing an LLM key configured.
+- Caching of generated alternatives and rate-limiting on the LLM endpoint were considered as
+  Level 4 candidates but not implemented, in favor of integration tests (see rationale above).
