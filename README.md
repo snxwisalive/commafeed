@@ -156,6 +156,12 @@ before running this yourself.
 
 ## My AI workflow
 
+**Note on agent configuration:** no separate `.cursorrules`/`CLAUDE.md` file was used for this
+task. Conventions were fed to the AI directly through the plan documents (`PLAN.md`) instead —
+the architecture analysis there (package layout, layer responsibilities, reference classes) is
+what would normally live in an agent-config file, just committed as a plan rather than a
+standing rules file.
+
 - **Level 1** was built with **Cursor**, prompted with the full REST→Service→DAO→Entity layer
   analysis up front (see `PLAN.md`), so the AI worked from an approved spec rather than
   prompt-and-pray. Midway through generation Cursor hit its context/token limit and locked the
